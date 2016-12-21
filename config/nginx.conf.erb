@@ -1,50 +1,90 @@
 daemon off;
-worker_processes <%= ENV['NGINX_WORKERS'] %>;
-pid /app/nginx.pid;
-error_log stderr;
+#Heroku dynos have at least 4 cores.
+worker_processes <%= ENV['NGINX_WORKERS'] || 4 %>;
 
 events {
-    use epoll;
-    accept_mutex on;
-    worker_connections 1024;
+	use epoll;
+	accept_mutex on;
+	worker_connections 1024;
 }
 
 http {
-    <% if ENV['NGINX_GZIP_ENABLED'] == '1' %>
-    gzip on;
-    gzip_disable msie6;
-    gzip_min_length 512;
-    gzip_proxied <%= ENV['NGINX_GZIP_PROXIED'] %>;
-    gzip_types <%= ENV['NGINX_GZIP_TYPES'] %>;
-    <% end %>
+        gzip on;
+        gzip_comp_level 6;
+        gzip_min_length 512;
+	gzip_types text/plain text/css application/json application/x-javascript text/xml application/xml application/xml+rss text/javascript;
+	gzip_proxied any;
+	gzip_vary on;
 
-    log_format l2met 'measure#nginx.service=$request_time request_id=$http_x_request_id';
-    access_log error l2met;
+	server_tokens off;
 
-    include mime.types;
-    default_type application/octet-stream;
-    sendfile on;
+	tcp_nopush on;
+	tcp_nodelay on;
 
-    # Increase default upload size from 1M to allow uploading larger images.
-    client_max_body_size 10M;
+	log_format l2met 'measure#nginx.service=$request_time request_id=$http_x_request_id';
+	access_log logs/nginx/access.log l2met;
+	error_log logs/nginx/error.log;
 
-    upstream app_server {
-        server <%= ENV['NGINX_SOCKET'] %> fail_timeout=0;
-    }
+	include mime.types;
+	default_type application/octet-stream;
+	sendfile on;
 
-    server {
-        listen <%= ENV['NGINX_LISTEN'] %>;
-        server_name _;
-        keepalive_timeout 5;
+	#Must read the body in 5 seconds.
+	client_body_timeout 5;
 
-        location / {
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header Host $http_host;
-            proxy_redirect off;
-            proxy_pass http://app_server;
-        }
-    }
+	server {
+		listen <%= ENV["PORT"] %>;
+		server_name _;
+		keepalive_timeout 5;
+		root dist;
+		index index.html;
 
-    # relative to location of nginx.conf
-    include nginx-local*.conf;
+		<% if ENV["FORCE_HTTPS"] %>
+		if ( $http_x_forwarded_proto != 'https' ) {
+			return 301 https://$host$request_uri;
+		}
+		<% end %>
+
+		<% if ENV["API_HOST"] %>
+		location <%= ENV["API_PREFIX_PATH"] || "/api/" %> {
+			proxy_pass <%= ENV["API_HOST"] %>;
+			proxy_set_header X-Application-ID <%= ENV["APPLICATION_ID"] %>;
+			proxy_set_header X-Real-IP $remote_addr;
+			proxy_set_header X-Fowarded-For $proxy_add_x_forwarded_for;
+			proxy_set_header X-NginX-Proxy true;
+			proxy_ssl_session_reuse off;
+			proxy_redirect off;
+		}
+		<% end %>
+
+		location ~* \index.html$ {
+			expires off;
+		}
+
+		location ~* \.(ogg|ogv|svgz|mp4|css|rss|atom|js|jpg|jpeg|gif|png|ico|zip|tgz|gz|rar|bz2|doc|xls|exe|ppt|tar|mid|midi|wav|bmp|rtf|html|txt|htm)$ {
+			expires max;
+			log_not_found off;
+			access_log off;
+			add_header Cache-Control public;
+			fastcgi_hide_header Set-Cookie;
+		}
+
+		location ~* \.(eot|oft|svg|ttf|woff)$ {
+			add_header Access-Control-Allow-Origin *;
+			expires max;
+			log_not_found off;
+			access_log off;
+			add_header Cache-Control public;
+			fastcgi_hide_header Set-Cookie;
+		}
+
+		location ~ /\. {
+			deny all;
+		}
+
+		location / {
+			expires off;
+			try_files $uri $uri/ /index.html =404;
+		}
+	}
 }
